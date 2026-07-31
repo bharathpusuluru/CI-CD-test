@@ -1,60 +1,110 @@
 # .github/workflows/adaptive-ci.yml
-# Adaptive CI/CD: the pushed commit's predicted risk chooses the pipeline lane.
-name: Adaptive CI
+# 🤖 Adaptive CI/CD — the pushed commit's predicted risk chooses the pipeline lane,
+# and every build's real outcome is logged back to close the learning loop.
+name: 🤖 Adaptive CI
 
-on: [push]
+on:
+  push:
+    paths-ignore:
+      - 'logs/**'          # don't re-trigger when we commit the outcome log
+  pull_request:
+
+permissions:
+  contents: write          # needed so log-outcome can commit logs/outcomes.csv
+  pull-requests: write     # needed so predict-risk can comment on PRs
 
 jobs:
-  # ---------- STAGE 0: predict risk BEFORE any build work ----------
+  # ══════════ STAGE 0: predict risk BEFORE any build work ══════════
   predict-risk:
+    name: 🔮 Predict risk
     runs-on: ubuntu-latest
     outputs:
-      lane:  ${{ steps.risk.outputs.lane }}
-      risk:  ${{ steps.risk.outputs.risk }}
-      score: ${{ steps.risk.outputs.score }}
+      lane:     ${{ steps.risk.outputs.lane }}
+      risk:     ${{ steps.risk.outputs.risk }}
+      score:    ${{ steps.risk.outputs.score }}
+      explored: ${{ steps.risk.outputs.explored }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2          # need the parent commit to diff against
+          fetch-depth: 2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Install deps (PIN sklearn to your Colab version!)
         run: pip install "scikit-learn==1.6.1" pandas numpy joblib
       - id: risk
+        name: Run risk model
         run: python predict.py
+      - name: Upload prediction + report
+        uses: actions/upload-artifact@v4
+        with:
+          name: prediction
+          path: |
+            prediction.json
+            risk_summary.md
+      - name: 💬 Comment risk on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('risk_summary.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner, repo: context.repo.repo, body });
 
-  # ---------- LOW risk -> fast lane (cheap) ----------
   fast-lane:
+    name: 🟢 Fast lane (low risk)
     needs: predict-risk
     if: needs.predict-risk.outputs.lane == 'LOW'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: echo "LOW risk (score ${{ needs.predict-risk.outputs.score }}) -> lint + unit tests only"
-      # - run: make lint
-      # - run: make unit-test
+      - run: echo "🟢 LOW risk (score ${{ needs.predict-risk.outputs.score }}) -> lint + unit tests only"
 
-  # ---------- MEDIUM risk -> standard pipeline ----------
   standard-lane:
+    name: 🟡 Standard lane (medium risk)
     needs: predict-risk
     if: needs.predict-risk.outputs.lane == 'MED'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: echo "MED risk -> full build + unit + integration tests"
-      # - run: make build
-      # - run: make test
+      - run: echo "🟡 MED risk -> full build + unit + integration tests"
 
-  # ---------- HIGH risk -> extended tests + manual gate ----------
   extended-lane:
+    name: 🔴 Extended lane (high risk)
     needs: predict-risk
     if: needs.predict-risk.outputs.lane == 'HIGH'
     runs-on: ubuntu-latest
-    environment: production   # add required reviewers in repo Settings to force manual approval
+    environment: production
     steps:
       - uses: actions/checkout@v4
-      - run: echo "HIGH risk (score ${{ needs.predict-risk.outputs.score }}) -> extended tests + security scan + approval"
-      # - run: make build
-      # - run: make test-all
-      # - run: make security-scan
+      - run: echo "🔴 HIGH risk (score ${{ needs.predict-risk.outputs.score }}) -> extended tests + security scan + approval"
+
+  # ══════════ STAGE 2: log the real outcome (closes the loop) ══════════
+  log-outcome:
+    name: 📝 Log outcome
+    needs: [predict-risk, fast-lane, standard-lane, extended-lane]
+    if: always() && github.event_name == 'push'   # log real outcomes on push only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download prediction
+        uses: actions/download-artifact@v4
+        with:
+          name: prediction
+      - name: Determine outcome and log
+        env:
+          # 'failed' if the lane that ran failed; else 'passed'
+          OUTCOME: ${{ (needs.fast-lane.result == 'failure' || needs.standard-lane.result == 'failure' || needs.extended-lane.result == 'failure') && 'failed' || 'passed' }}
+        run: python log_outcome.py
+      - name: Commit outcome log
+        run: |
+          git config user.name  "adaptive-ci-bot"
+          git config user.email "actions@github.com"
+          git add logs/outcomes.csv
+          git commit -m "chore: log CI outcome [skip ci]" || echo "nothing to commit"
+          git push
