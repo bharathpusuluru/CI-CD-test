@@ -15,7 +15,7 @@ git-derivable ones and leave the rest as NaN — the model's built-in imputer
 fills them with the training medians. So live predictions lean on the
 change-shape features (churn, files, docs-only), which is honest and fine.
 """
-import os, subprocess, sys
+import os, subprocess, sys, json, random, datetime
 import numpy as np
 import pandas as pd
 import joblib
@@ -23,6 +23,10 @@ import joblib
 # ---- policy thresholds (from your Colab Pareto analysis) ----
 LOW_MAX  = 0.10   # p < 0.10  -> LOW  (fast lane)
 HIGH_MIN = 0.20   # p >= 0.20 -> HIGH (extended + manual gate); between -> MED
+
+# ---- exploration: occasionally force a full run on a LOW commit so we still
+#      observe its true outcome (fixes the censored-feedback problem, RQ3) ----
+EXPLORE_RATE = 0.15
 
 DOC_EXT  = {".md", ".rst", ".txt", ".adoc"}
 SRC_EXT  = {".py", ".java", ".js", ".ts", ".rb", ".go", ".c", ".cpp", ".cc",
@@ -167,9 +171,16 @@ def main():
     X, known, is_docs = build_features(feats)
     p = float(model.predict_proba(X)[:, 1][0])
 
-    lane = "LOW" if p < LOW_MAX else ("HIGH" if p >= HIGH_MIN else "MED")
+    predicted_lane = "LOW" if p < LOW_MAX else ("HIGH" if p >= HIGH_MIN else "MED")
+
+    # exploration: sometimes upgrade a LOW commit to a full run to keep ground truth flowing
+    explored = int(predicted_lane == "LOW" and random.random() < EXPLORE_RATE)
+    lane = "MED" if explored else predicted_lane
+
     risk = {"LOW": "Low", "MED": "Medium", "HIGH": "High"}[lane]
     reasons = explain(known, p, lane)
+    if explored:
+        reasons.append("selected for exploration (full run to verify a low-risk prediction)")
 
     # ---- human-readable output in the Actions log ----
     print("=" * 52)
@@ -192,6 +203,20 @@ def main():
     with open("risk_summary.md", "w") as f:
         f.write(summary_md)
 
+    # ---- record the prediction so the log-outcome job can pair it with the
+    #      real build result (closes the learning loop) ----
+    record = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "commit": os.environ.get("GITHUB_SHA", sh(["git", "rev-parse", "HEAD"])),
+        "score": round(p, 4),
+        "predicted_lane": predicted_lane,
+        "lane_run": lane,
+        "explored": explored,
+        **{k: (None if pd.isna(v) else v) for k, v in known.items()},
+    }
+    with open("prediction.json", "w") as f:
+        json.dump(record, f)
+
     # ---- machine-readable output for downstream jobs ----
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
@@ -199,6 +224,7 @@ def main():
             f.write(f"lane={lane}\n")
             f.write(f"risk={risk}\n")
             f.write(f"score={p:.3f}\n")
+            f.write(f"explored={explored}\n")
 
 
 if __name__ == "__main__":
