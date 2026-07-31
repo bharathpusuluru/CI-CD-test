@@ -1,0 +1,60 @@
+# .github/workflows/adaptive-ci.yml
+# Adaptive CI/CD: the pushed commit's predicted risk chooses the pipeline lane.
+name: Adaptive CI
+
+on: [push]
+
+jobs:
+  # ---------- STAGE 0: predict risk BEFORE any build work ----------
+  predict-risk:
+    runs-on: ubuntu-latest
+    outputs:
+      lane:  ${{ steps.risk.outputs.lane }}
+      risk:  ${{ steps.risk.outputs.risk }}
+      score: ${{ steps.risk.outputs.score }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2          # need the parent commit to diff against
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps (PIN sklearn to your Colab version!)
+        run: pip install "scikit-learn==1.6.1" pandas numpy joblib
+      - id: risk
+        run: python predict.py
+
+  # ---------- LOW risk -> fast lane (cheap) ----------
+  fast-lane:
+    needs: predict-risk
+    if: needs.predict-risk.outputs.lane == 'LOW'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "LOW risk (score ${{ needs.predict-risk.outputs.score }}) -> lint + unit tests only"
+      # - run: make lint
+      # - run: make unit-test
+
+  # ---------- MEDIUM risk -> standard pipeline ----------
+  standard-lane:
+    needs: predict-risk
+    if: needs.predict-risk.outputs.lane == 'MED'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "MED risk -> full build + unit + integration tests"
+      # - run: make build
+      # - run: make test
+
+  # ---------- HIGH risk -> extended tests + manual gate ----------
+  extended-lane:
+    needs: predict-risk
+    if: needs.predict-risk.outputs.lane == 'HIGH'
+    runs-on: ubuntu-latest
+    environment: production   # add required reviewers in repo Settings to force manual approval
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "HIGH risk (score ${{ needs.predict-risk.outputs.score }}) -> extended tests + security scan + approval"
+      # - run: make build
+      # - run: make test-all
+      # - run: make security-scan
