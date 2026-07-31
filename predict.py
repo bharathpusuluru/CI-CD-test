@@ -126,6 +126,40 @@ def explain(known, p, lane):
     return reasons
 
 
+def risk_meter(p, width=20):
+    """ASCII risk bar, e.g. [█████████░░░░░░░░░░░] 45%"""
+    fill = int(round(p * width))
+    return "`[" + "█" * fill + "░" * (width - fill) + f"]` **{p*100:.0f}%**"
+
+
+def build_summary(p, risk, lane, reasons, known):
+    emoji = {"LOW": "🟢", "MED": "🟡", "HIGH": "🔴"}[lane]
+    lane_action = {
+        "LOW":  "**Fast lane** — lint + unit tests only (skips expensive stages)",
+        "MED":  "**Standard pipeline** — full build + unit + integration tests",
+        "HIGH": "**Extended validation** — full tests + security scan + manual approval gate",
+    }[lane]
+    reason_md = "\n".join(f"- {r}" for r in reasons)
+    return f"""## {emoji} Pre-Build Risk Prediction
+
+| | |
+|---|---|
+| **Risk level** | {emoji} **{risk}** |
+| **Risk score** | {risk_meter(p)} |
+| **Pipeline lane** | `{lane}` |
+| **Files changed** | {known['total_files_changed']} |
+| **Code churn** | {known['total_churn']} lines |
+
+### 🔀 Selected pipeline
+{lane_action}
+
+### 💡 Why this prediction
+{reason_md}
+
+<sub>Predicted by the Adaptive CI/CD risk model before any build stage ran.</sub>
+"""
+
+
 def main():
     bundle = joblib.load("model.joblib")
     model, feats = bundle["model"], bundle["features"]
@@ -145,6 +179,18 @@ def main():
     print(f"  Pipeline   : {lane} lane")
     print(f"  Why        : " + "; ".join(reasons))
     print("=" * 52)
+
+    summary_md = build_summary(p, risk, lane, reasons, known)
+
+    # ---- rich visual report card on the Actions run summary page ----
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a") as f:
+            f.write(summary_md)
+
+    # ---- save summary so a later job can post it as a PR comment ----
+    with open("risk_summary.md", "w") as f:
+        f.write(summary_md)
 
     # ---- machine-readable output for downstream jobs ----
     out = os.environ.get("GITHUB_OUTPUT")
