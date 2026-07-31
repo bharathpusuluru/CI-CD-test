@@ -1,0 +1,2 @@
+logged_at,commit,score,predicted_lane,lane_run,explored,outcome,total_files_changed,total_churn,git_diff_src_churn,is_docs_only
+2026-07-31T08:54:47.072669,221ddc075297e1017dbf1fdad36cbb496a959c4b,0.1355,MED,MED,0,passed,1,58,58,0
